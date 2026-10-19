@@ -1,0 +1,12 @@
+// Copy to Config/Local.xcconfig (git-ignored) and set your own values.
+
+// Your Apple developer team ID (Xcode → Settings → Accounts). A free personal team works;
+// apps signed with one must be reinstalled every 7 days.
+DEVELOPMENT_TEAM = YOURTEAMID
+
+// Bundle IDs must be unique to you.
+PG_IOS_BUNDLE_ID = com.yourname.privategram
+PG_MAC_BUNDLE_ID = com.yourname.privategram.mac
+
+// Home-screen / Dock name.
+PG_DISPLAY_NAME = PrivateGram

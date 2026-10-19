@@ -1,0 +1,9 @@
+// Public build settings. To build for your own devices, copy Local.example.xcconfig to
+// Local.xcconfig (it is git-ignored) and fill in your own values there.
+
+DEVELOPMENT_TEAM =
+PG_IOS_BUNDLE_ID = com.example.privategram
+PG_MAC_BUNDLE_ID = com.example.privategram.mac
+PG_DISPLAY_NAME = PrivateGram
+
+#include? "Local.xcconfig"
