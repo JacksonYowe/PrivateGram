@@ -204,6 +204,27 @@ enum Skin {
         } catch (_) {}
       }
 
+      // Sound on: Instagram's website starts every video muted. Unmute at full volume whenever a
+      // video plays — unless you muted it yourself with Instagram's mute button.
+      let lastRealTap = 0;
+      const userMuted = new WeakSet();
+      document.addEventListener('click', (e) => { if (e.isTrusted) lastRealTap = Date.now(); }, true);
+      const soundOn = (v) => {
+        if (!(v instanceof HTMLVideoElement) || userMuted.has(v)) return;
+        if (v.muted) v.muted = false;
+        if (v.volume !== 1) v.volume = 1;
+      };
+      document.addEventListener('play', (e) => soundOn(e.target), true);
+      document.addEventListener('volumechange', (e) => {
+        const v = e.target;
+        if (!(v instanceof HTMLVideoElement)) return;
+        if (Date.now() - lastRealTap < 800) {        // you pressed mute/unmute
+          if (v.muted) userMuted.add(v); else userMuted.delete(v);
+        } else if (v.muted) {
+          soundOn(v);                                  // the page muted it on its own
+        }
+      }, true);
+
       let pending = false;
       const start = () => {
         scan();

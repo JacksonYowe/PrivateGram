@@ -1,10 +1,13 @@
 import UIKit
+import AVFoundation
 
 @main
 final class AppDelegate: UIResponder, UIApplicationDelegate {
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-        true
+        // Video sound plays even with the ringer switch on silent, like Instagram's own app.
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+        return true
     }
 
     func application(_ application: UIApplication,
