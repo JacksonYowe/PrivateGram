@@ -35,6 +35,8 @@ client can hide that.
 - Native Instagram-style tab bar (Home, Reels, Messages, Search, Profile).
 - Full-screen Reels, app-style Messages inbox, full-screen chats (per-screen restyling).
 - Share: Instagram's own share screen, plus a **More** button for the iOS share sheet.
+- Notifications: banners, sound and badges for new messages and activity — instantly while open,
+  and from Background App Refresh checks. Made on the phone; no push token or server.
 - Privacy panel (shake the phone, or long-press the icon → Privacy): tracker-blocking switch,
   sign in with an emailed log-in link, clear cache, erase everything.
 - Always dark.
