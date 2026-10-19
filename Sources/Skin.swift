@@ -55,12 +55,38 @@ enum Skin {
     /// how tall that bar is (so the native bar can sit exactly over it), your profile link and
     /// your avatar. It only reads the page: it never adds, hides, restyles or clicks anything. If Instagram changes its page so the bar can't be
     /// found, the native bar simply stays away and you get plain Instagram instead of a broken app.
+    /// Reads Instagram's own unread indicators from the page: the unread-messages count on the
+    /// Messages link ("Direct messaging - N new notifications") and the red dot on the
+    /// Notifications heart. Numbers and a yes/no only — no names or message text.
+    static let badgeJS = #"""
+    (() => {
+      // null = this screen doesn't show the indicator (unknown), not zero.
+      let dms = document.querySelector('svg[aria-label="Messages"]') ? 0 : null;
+      for (const el of document.querySelectorAll('[aria-label^="Direct messaging"]')) {
+        const m = /(\d+)/.exec(el.getAttribute('aria-label') || '');
+        if (m) dms = Math.max(dms || 0, parseInt(m[1], 10));
+      }
+      let activity = null;
+      for (const a of document.querySelectorAll('a[href], [role="button"], [role="link"]')) {
+        if (!a.querySelector('svg[aria-label="Notifications"]')) continue;
+        if (activity === null) activity = false;
+        for (const e of a.querySelectorAll('*')) {
+          const r = e.getBoundingClientRect();
+          if (r.width > 0 && r.width < 14 && /rgb\(255, (48|0)/.test(getComputedStyle(e).backgroundColor)) { activity = true; break; }
+        }
+      }
+      return { dms, activity };
+    })()
+    """#
+
     /// Per-screen CSS (keys: all, home, reels, explore, inbox, direct, stories, post, other).
     static let styles: [String: String] = Restyle.css
 
     static var script: String {
         let data = (try? JSONSerialization.data(withJSONObject: styles)) ?? Data("{}".utf8)
-        return scriptTemplate.replacingOccurrences(of: "__PG_STYLES__", with: String(decoding: data, as: UTF8.self))
+        return scriptTemplate
+            .replacingOccurrences(of: "__PG_STYLES__", with: String(decoding: data, as: UTF8.self))
+            .replacingOccurrences(of: "__PG_BADGES__", with: badgeJS)
     }
 
     private static let scriptTemplate = #"""
@@ -89,7 +115,13 @@ enum Skin {
 
       let nav = null, last = '';
       const report = (m) => { const r = JSON.stringify(m); if (r !== last) { last = r; post(m); } };
+      let lastBadges = '';
+      const BADGES = () => __PG_BADGES__;
       const scan = () => {
+        try {
+          const b = BADGES(), key = b.dms + '/' + b.activity;
+          if (key !== lastBadges) { lastBadges = key; post({ type: 'badges', dms: b.dms, activity: b.activity }); }
+        } catch (_) {}
         applyStyle();
         if (!nav || !nav.isConnected) nav = findNav();
         if (!nav) { report({ type: 'nav', found: false }); return; }
@@ -329,6 +361,35 @@ final class SkinTabBar: UIView {
         guard dark != darkMode else { return }
         darkMode = dark
         refresh()
+    }
+
+    /// Red unread count on the Messages tab, like the app.
+    func setMessagesBadge(_ count: Int) {
+        guard let button = buttons[.messages] else { return }
+        let tag = 9_001
+        var label = button.viewWithTag(tag) as? UILabel
+        if count <= 0 { label?.removeFromSuperview(); return }
+        if label == nil {
+            let l = UILabel()
+            l.tag = tag
+            l.backgroundColor = UIColor(red: 1, green: 48 / 255, blue: 64 / 255, alpha: 1)
+            l.textColor = .white
+            l.font = .systemFont(ofSize: 11, weight: .bold)
+            l.textAlignment = .center
+            l.layer.cornerRadius = 9
+            l.clipsToBounds = true
+            l.isUserInteractionEnabled = false
+            l.translatesAutoresizingMaskIntoConstraints = false
+            button.addSubview(l)
+            NSLayoutConstraint.activate([
+                l.centerXAnchor.constraint(equalTo: button.centerXAnchor, constant: 12),
+                l.centerYAnchor.constraint(equalTo: button.centerYAnchor, constant: -10),
+                l.heightAnchor.constraint(equalToConstant: 18),
+                l.widthAnchor.constraint(greaterThanOrEqualToConstant: 18),
+            ])
+            label = l
+        }
+        label?.text = count > 99 ? " 99+ " : count >= 10 ? " \(count) " : "\(count)"
     }
 
     func setAvatar(_ image: UIImage?) {

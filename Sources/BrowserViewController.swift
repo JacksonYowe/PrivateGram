@@ -68,6 +68,11 @@ final class BrowserViewController: UIViewController {
         ])
 
         startShields()
+        // Notification taps open the right screen.
+        Alerts.shared.onOpen = { [weak self] path in
+            guard let url = URL(string: path, relativeTo: Self.home)?.absoluteURL else { return }
+            self?.safeLoad(url)
+        }
         // Finish deleting any old data containers from a previous "erase everything".
         Task { await Privacy.deleteRetiredDataStores() }
     }
@@ -257,6 +262,35 @@ final class BrowserViewController: UIViewController {
                     }
                 }
             case 1, 2:
+                // Count badges: only small pure-number labels and icon names, nothing else.
+                let probe = #"""
+                const out = [];
+                for (const el of document.querySelectorAll('body *')) {
+                  const t = (el.childElementCount === 0 ? el.textContent : '').trim();
+                  const r = el.getBoundingClientRect();
+                  const isNum = /^[0-9]{1,3}\+?$/.test(t) && r.width < 40 && r.height < 40 && r.width > 0;
+                  if (!isNum) continue;
+                  const chain = [];
+                  for (let p = el; p && p !== document.body && chain.length < 12; p = p.parentElement) {
+                    const svg = p.querySelector(':scope > svg[aria-label], :scope svg[aria-label]');
+                    chain.push({ t: p.tagName, role: p.getAttribute('role') || '', href: p.tagName === 'A' ? (p.getAttribute('href') || '').replace(/^\/[^\/]+\/$/, '/<user>/') : '',
+                      icon: svg ? svg.getAttribute('aria-label') : '', aria: (p.getAttribute('aria-label') || '').replace(/[^A-Za-z ]/g, '').slice(0, 40),
+                      pos: getComputedStyle(p).position });
+                  }
+                  out.push({ text: t, x: Math.round(r.x), y: Math.round(r.y), bg: getComputedStyle(el.parentElement).backgroundColor, chain });
+                }
+                const labels = [...new Set([...document.querySelectorAll('[aria-label]')].map(e => e.getAttribute('aria-label'))
+                  .filter(l => /notif|activity|unread|new|messag/i.test(l)).map(l => l.replace(/[0-9]+/g, '#')))];
+                const dots = [...document.querySelectorAll('a[href], [role=button], [role=link]')].filter(a => a.querySelector('svg[aria-label="Notifications"]'))
+                  .map(a => [...a.querySelectorAll('*')].filter(e => { const r = e.getBoundingClientRect(); const bg = getComputedStyle(e).backgroundColor; return r.width > 0 && r.width < 14 && /255, 48, 64|rgb\(255, 0/.test(bg); }).length);
+                return JSON.stringify({ out, labels, dots });
+                """#
+                let badgeName = "shot-\(stage)-badges.json"
+                webView.callAsyncJavaScript(probe, arguments: [:], in: nil, in: Skin.world) { result in
+                    if case .success(let v) = result, let text = v as? String {
+                        try? text.write(to: docs.appendingPathComponent(badgeName), atomically: true, encoding: .utf8)
+                    }
+                }
                 let root: UIView = self.view
                 let image = UIGraphicsImageRenderer(bounds: root.bounds).image { _ in
                     root.drawHierarchy(in: root.bounds, afterScreenUpdates: true)
@@ -335,6 +369,17 @@ final class BrowserViewController: UIViewController {
         let args = ProcessInfo.processInfo.arguments
         if args.contains("-pgRecord") { _ = layoutTimer }
         if let i = args.firstIndex(of: "-pgShoot"), i + 1 < args.count { startShooting(args[i + 1]) }
+        if args.contains("-pgBgCheck") {
+            // Dev-only: run the background check now and record what it read (numbers only).
+            Task { @MainActor in
+                let ok = await BackgroundCheck.Checker().run()
+                let d = UserDefaults.standard
+                let text = "ok=\(ok) dms=\(d.integer(forKey: "alertsLastDMs")) activity=\(d.bool(forKey: "alertsLastActivity"))"
+                if let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+                    try? text.write(to: docs.appendingPathComponent("bgcheck.txt"), atomically: true, encoding: .utf8)
+                }
+            }
+        }
         #endif
         #if DEBUG && targetEnvironment(simulator)
         if ProcessInfo.processInfo.arguments.contains("-pgEval") { _ = debugTimer }
@@ -426,6 +471,16 @@ final class BrowserViewController: UIViewController {
     fileprivate func handleSkinMessage(_ body: Any) {
         guard let msg = body as? [String: Any] else { return }
         if msg["type"] as? String == "share" { presentShareSheet(msg); return }
+        if msg["type"] as? String == "badges" {
+            let dms = ((msg["dms"] as? Int) ?? (msg["dms"] as? Double).map(Int.init)).map { max(0, min($0, 999)) }
+            let activity = msg["activity"] as? Bool
+            if let dms { tabBar.setMessagesBadge(dms) }
+            if signedInWithNativeNav {
+                Alerts.shared.requestPermissionIfNeeded()
+                Alerts.shared.update(dms: dms, activity: activity, currentPath: currentPath)
+            }
+            return
+        }
         guard msg["type"] as? String == "nav" else { return }
         #if DEBUG && targetEnvironment(simulator)
         print("[skin]", msg)
@@ -534,6 +589,8 @@ final class BrowserViewController: UIViewController {
                 // outright, including WebKit's internal HSTS / tracking data.
                 dismiss(animated: true)
                 pendingLoad = nil
+                Alerts.shared.clear()
+                tabBar.setMessagesBadge(0)
                 profilePath = nil
                 avatarKey = nil
                 tabBar.setAvatar(nil)

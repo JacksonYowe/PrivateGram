@@ -53,6 +53,11 @@ targets:
         NSMicrophoneUsageDescription: Only used when you choose to record a video to post.
         NSPhotoLibraryAddUsageDescription: Only used when you choose to save an image.
         ITSAppUsesNonExemptEncryption: false
+        # Background App Refresh for message/activity checks (local notifications only).
+        UIBackgroundModes:
+          - fetch
+        BGTaskSchedulerPermittedIdentifiers:
+          - $(PRODUCT_BUNDLE_IDENTIFIER).refresh
         UIApplicationShortcutItems:
           - UIApplicationShortcutItemType: privacy
             UIApplicationShortcutItemTitle: Privacy

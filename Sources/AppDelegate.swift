@@ -1,5 +1,6 @@
 import UIKit
 import AVFoundation
+import UserNotifications
 
 @main
 final class AppDelegate: UIResponder, UIApplicationDelegate {
@@ -7,6 +8,8 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         // Video sound plays even with the ringer switch on silent, like Instagram's own app.
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+        UNUserNotificationCenter.current().delegate = Alerts.shared
+        BackgroundCheck.register()
         return true
     }
 
@@ -55,7 +58,24 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         privacyCover = cover
     }
 
+    // After you leave the app, keep listening for ~25 s (new messages still trigger banners),
+    // then hand over to Background App Refresh.
+    private var grace: UIBackgroundTaskIdentifier = .invalid
+    func sceneDidEnterBackground(_ scene: UIScene) {
+        BackgroundCheck.schedule()
+        guard grace == .invalid else { return }
+        grace = UIApplication.shared.beginBackgroundTask { [weak self] in self?.endGrace() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 25) { [weak self] in self?.endGrace() }
+    }
+
+    private func endGrace() {
+        guard grace != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(grace)
+        grace = .invalid
+    }
+
     func sceneDidBecomeActive(_ scene: UIScene) {
+        endGrace()
         privacyCover?.removeFromSuperview()
         privacyCover = nil
     }

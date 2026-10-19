@@ -10,6 +10,7 @@ struct SettingsView: View {
 
     @State private var confirmWipe = false
     @State private var cacheCleared = false
+    @State private var alertsOn = Alerts.shared.enabled
     @State private var loginText = ""
     @State private var loginError = false
 
@@ -47,6 +48,16 @@ struct SettingsView: View {
                          ? "That isn't an Instagram link. Copy the log-in link from Instagram's email and try again."
                          : "In Instagram's \"log in\" email, press and hold the button or link, tap Copy Link, then paste it here. You'll be signed in inside this app, not in Safari.")
                         .foregroundStyle(loginError ? .red : .secondary)
+                }
+
+                Section {
+                    Toggle("Message & activity alerts", isOn: $alertsOn)
+                        .onChange(of: alertsOn) { _, value in
+                            Alerts.shared.enabled = value
+                            if value { Alerts.shared.requestPermissionIfNeeded(); BackgroundCheck.schedule() }
+                        }
+                } footer: {
+                    Text("Banners and an app-icon badge for new messages and activity — instantly while the app is open, and from occasional background checks (iOS decides when, usually a few times a day). Made on your phone; nothing is sent anywhere.")
                 }
 
                 Section {
