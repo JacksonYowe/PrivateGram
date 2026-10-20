@@ -19,6 +19,8 @@ final class BrowserViewController: UIViewController {
     private var avatarKey: String?
     private let errorView = UILabel()
     private let tabBar = SkinTabBar()
+    /// The app's back arrow in an open chat (the website has none on a phone-sized screen).
+    private let chatBackButton = UIButton(type: .system)
     private var webBottomToTabBar: NSLayoutConstraint!
     private var webBottomToSafeArea: NSLayoutConstraint!
     private var urlObservation: NSKeyValueObservation?
@@ -52,6 +54,27 @@ final class BrowserViewController: UIViewController {
             tabBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -49),
         ])
         installWebView()
+
+        let chevron = UIImage(systemName: "chevron.left",
+                              withConfiguration: UIImage.SymbolConfiguration(pointSize: 22, weight: .semibold))
+        chatBackButton.setImage(chevron, for: .normal)
+        chatBackButton.tintColor = .white
+        chatBackButton.accessibilityLabel = "Back to Messages"
+        chatBackButton.isHidden = true
+        chatBackButton.addTarget(self, action: #selector(leaveChat), for: .touchUpInside)
+        chatBackButton.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(chatBackButton)
+        NSLayoutConstraint.activate([
+            chatBackButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 4),
+            chatBackButton.centerYAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 38),
+            chatBackButton.widthAnchor.constraint(equalToConstant: 44),
+            chatBackButton.heightAnchor.constraint(equalToConstant: 44),
+        ])
+        // Swipe in from the left edge to leave a chat (also when there's no page to go back to).
+        let edge = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(edgeSwipe(_:)))
+        edge.edges = .left
+        edge.delegate = self
+        view.addGestureRecognizer(edge)
 
         errorView.numberOfLines = 0
         errorView.textAlignment = .center
@@ -369,6 +392,24 @@ final class BrowserViewController: UIViewController {
         let args = ProcessInfo.processInfo.arguments
         if args.contains("-pgRecord") { _ = layoutTimer }
         if let i = args.firstIndex(of: "-pgShoot"), i + 1 < args.count { startShooting(args[i + 1]) }
+        if args.contains("-pgRecordChat") {
+            // Dev-only: when you open a chat, save its layout (sizes/positions/icons) and a screenshot.
+            Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] timer in
+                guard let self, Skin.path(currentPath, isIn: "/direct/t") else { return }
+                timer.invalidate()
+                guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+                webView.callAsyncJavaScript(Self.layoutJS, arguments: [:], in: nil, in: Skin.world) { result in
+                    if case .success(let v) = result, let text = v as? String {
+                        try? text.write(to: docs.appendingPathComponent("chat.json"), atomically: true, encoding: .utf8)
+                    }
+                }
+                let root: UIView = self.view
+                let image = UIGraphicsImageRenderer(bounds: root.bounds).image { _ in
+                    root.drawHierarchy(in: root.bounds, afterScreenUpdates: true)
+                }
+                try? image.pngData()?.write(to: docs.appendingPathComponent("chat.png"))
+            }
+        }
         if args.contains("-pgBgCheck") {
             // Dev-only: run the background check now and record what it read (numbers only).
             Task { @MainActor in
@@ -411,7 +452,26 @@ final class BrowserViewController: UIViewController {
 
     private var currentPath: String { webView.url?.path ?? "/" }
 
+    private var inChat: Bool { Skin.path(currentPath, isIn: "/direct/t") }
+
+    /// Back to the Messages list: step back if that's where you came from, otherwise open it.
+    @objc private func leaveChat() {
+        UISelectionFeedbackGenerator().selectionChanged()
+        if let back = webView.backForwardList.backItem, Skin.path(back.url.path, isIn: "/direct/inbox") {
+            webView.goBack()
+        } else {
+            safeLoad(URL(string: "https://www.instagram.com/direct/inbox/")!)
+        }
+    }
+
+    @objc private func edgeSwipe(_ gesture: UIScreenEdgePanGestureRecognizer) {
+        guard gesture.state == .ended, inChat, gesture.translation(in: view).x > 60 else { return }
+        leaveChat()
+    }
+
     private func updateChrome() {
+        chatBackButton.isHidden = !inChat
+        if inChat { view.bringSubviewToFront(chatBackButton) }
         let path = currentPath
         let show = signedInWithNativeNav && !revealWebNav && !Skin.hidesTabBar(path: path)
         // Pull-to-refresh only where it can't fight Instagram's own scrolling (reels, stories, chats).
@@ -804,5 +864,14 @@ private extension UIImage {
             for c in 0..<3 { lo[c] = min(lo[c], px[i + c]); hi[c] = max(hi[c], px[i + c]) }
         }
         return (0..<3).allSatisfy { Int(hi[$0]) - Int(lo[$0]) < 12 }
+    }
+}
+
+extension BrowserViewController: UIGestureRecognizerDelegate {
+    /// The edge swipe only takes over in a chat when the web view has nothing to go back to
+    /// (otherwise its own swipe-back already handles it).
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard gestureRecognizer is UIScreenEdgePanGestureRecognizer else { return true }
+        return inChat && !webView.canGoBack
     }
 }

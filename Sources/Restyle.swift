@@ -17,6 +17,11 @@ enum Restyle {
         "direct": """
         main div[role="navigation"] { display: none !important; }
         div:has(a[href="/explore/"]):has(a[href="/direct/inbox/"]):not(:has(main)) { display: none !important; }
+        /* Room for the app's back button: the chat header is the outermost block holding the call
+           buttons but not the message box. */
+        div:has([role="textbox"], textarea) > div:has(svg[aria-label="Audio call"]):not(:has([role="textbox"], textarea)) {
+          padding-left: 48px !important;
+        }
         """,
 
         // Messages inbox. It's laid out at desktop width (the only width where Instagram lists
