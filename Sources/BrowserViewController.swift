@@ -1,6 +1,7 @@
 import UIKit
 import WebKit
 import SwiftUI
+import CoreImage
 
 final class BrowserViewController: UIViewController {
 
@@ -21,6 +22,18 @@ final class BrowserViewController: UIViewController {
     private let tabBar = SkinTabBar()
     /// The app's back arrow in an open chat (the website has none on a phone-sized screen).
     private let chatBackButton = UIButton(type: .system)
+    /// Native search on Explore (Instagram's own box doesn't work in this environment): a search
+    /// bar plus a live account-suggestions list, powered by Instagram's own search endpoint.
+    private let searchBar = UISearchBar()
+    private let searchResults = UITableView()
+    private var searchRows: [SearchRow] = []
+    private var searchWork: DispatchWorkItem?
+    private let avatarCache = NSCache<NSURL, UIImage>()
+    private static let imageSession: URLSession = {
+        let c = URLSessionConfiguration.ephemeral; c.httpCookieStorage = nil; c.httpShouldSetCookies = false
+        return URLSession(configuration: c)
+    }()
+    struct SearchRow { var username = ""; var title = ""; var subtitle = ""; var avatar: URL?; var verified = false; var isQuery = false }
     private var webBottomToTabBar: NSLayoutConstraint!
     private var webBottomToSafeArea: NSLayoutConstraint!
     private var urlObservation: NSKeyValueObservation?
@@ -52,6 +65,42 @@ final class BrowserViewController: UIViewController {
             tabBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             tabBar.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             tabBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -49),
+        ])
+
+        searchBar.placeholder = "Search"
+        searchBar.delegate = self
+        searchBar.barStyle = .black
+        searchBar.isTranslucent = false
+        searchBar.backgroundColor = .black
+        searchBar.barTintColor = .black
+        searchBar.searchTextField.returnKeyType = .search
+        searchBar.autocapitalizationType = .none
+        searchBar.autocorrectionType = .no
+        searchBar.isHidden = true
+        searchBar.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(searchBar)
+        NSLayoutConstraint.activate([
+            searchBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            searchBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            searchBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            searchBar.heightAnchor.constraint(equalToConstant: 50),
+        ])
+
+        searchResults.dataSource = self
+        searchResults.delegate = self
+        searchResults.backgroundColor = .black
+        searchResults.separatorColor = UIColor.white.withAlphaComponent(0.1)
+        searchResults.rowHeight = 56
+        searchResults.keyboardDismissMode = .onDrag
+        searchResults.isHidden = true
+        searchResults.translatesAutoresizingMaskIntoConstraints = false
+        searchResults.register(UITableViewCell.self, forCellReuseIdentifier: "hit")
+        view.addSubview(searchResults)
+        NSLayoutConstraint.activate([
+            searchResults.topAnchor.constraint(equalTo: searchBar.bottomAnchor),
+            searchResults.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            searchResults.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            searchResults.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
         installWebView()
 
@@ -266,7 +315,98 @@ final class BrowserViewController: UIViewController {
           nodes: out });
         """#
 
-    /// Dev-only (launch with -pgShoot <path>): once logged in, opens that page and saves a
+    /// Dev-only (-pgSearchProbe): type a query into Explore search, then dump what appears.
+    private func searchProbe() {
+        var stage = 0
+        Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] timer in
+            guard let self, rulesState == .ready, signedInWithNativeNav || stage > 0 else { return }
+            guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+            switch stage {
+            case 0:
+                safeLoad(URL(string: "https://www.instagram.com/explore/")!)
+            case 1:
+                let type = #"""
+                const inp = document.querySelector('input[aria-label="Search input"], input[placeholder="Search"]');
+                if (!inp) return 'no input';
+                const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+                inp.focus(); setter.call(inp, 'cat');
+                inp.dispatchEvent(new Event('input', { bubbles: true }));
+                inp.dispatchEvent(new Event('change', { bubbles: true }));
+                return 'typed';
+                """#
+                webView.evaluateJavaScript(type, in: nil, in: Skin.world) { _ in }
+            default:
+                let dump = #"""
+                const pick = (el) => { const r = el.getBoundingClientRect();
+                  return { t: el.tagName, role: el.getAttribute('role') || '', aria: (el.getAttribute('aria-label')||'').slice(0,30),
+                    cls: (typeof el.className === 'string' ? el.className.split(' ').slice(0,4).join(' ') : ''),
+                    x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height),
+                    pos: getComputedStyle(el).position, ov: getComputedStyle(el).overflow, z: getComputedStyle(el).zIndex, vis: r.width>0&&r.height>0 }; };
+                const inp = document.querySelector('input[aria-label="Search input"], input[placeholder="Search"]');
+                const links = [...document.querySelectorAll('a[href^="/"]')].filter(a => { const r=a.getBoundingClientRect(); return r.width>0 && r.y>40; }).slice(0,12).map(pick);
+                // walk up from the input to find the results container (a tall scrollable sibling)
+                let container = null;
+                if (inp) { let p = inp.parentElement; for (let i=0;i<10 && p;i++,p=p.parentElement){ const r=p.getBoundingClientRect(); if (r.height>150){ container=pick(p); break; } } }
+                return JSON.stringify({ url: location.pathname, inputValue: inp ? inp.value : null, inputVis: inp ? (inp.getBoundingClientRect().width>0) : false, container, resultLinks: links });
+                """#
+                webView.callAsyncJavaScript(dump, arguments: [:], in: nil, in: Skin.world) { result in
+                    if case .success(let v) = result, let text = v as? String {
+                        try? text.write(to: docs.appendingPathComponent("search.json"), atomically: true, encoding: .utf8)
+                    }
+                }
+                let root: UIView = self.view
+                let image = UIGraphicsImageRenderer(bounds: root.bounds).image { _ in root.drawHierarchy(in: root.bounds, afterScreenUpdates: true) }
+                try? image.pngData()?.write(to: docs.appendingPathComponent("search.png"))
+                try? "done".write(to: docs.appendingPathComponent("search-done.txt"), atomically: true, encoding: .utf8)
+                timer.invalidate()
+            }
+            stage += 1
+        }
+    }
+
+        /// Dev-only (launch with -pgInspect <path>): load a page, then dump search/button structure
+    /// (inputs, roles, aria-labels, nav links) + a screenshot, for layout work. Browsing only.
+    private func inspect(_ path: String) {
+        var stage = 0
+        Timer.scheduledTimer(withTimeInterval: 6, repeats: true) { [weak self] timer in
+            guard let self, rulesState == .ready, signedInWithNativeNav || stage > 0 else { return }
+            guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+            if stage == 0 {
+                if let url = URL(string: path, relativeTo: Self.home)?.absoluteURL { safeLoad(url) }
+                stage = 1
+                return
+            }
+            let js = #"""
+            const pick = (el) => {
+              const r = el.getBoundingClientRect();
+              return { t: el.tagName, type: el.getAttribute('type') || '', role: el.getAttribute('role') || '',
+                aria: (el.getAttribute('aria-label') || '').slice(0, 40), ph: (el.getAttribute('placeholder') || '').slice(0, 40),
+                svg: (el.querySelector(':scope > svg[aria-label]')?.getAttribute('aria-label')) || '',
+                href: el.tagName === 'A' ? (el.getAttribute('href') || '').replace(/^\/[^\/]+\/?$/, '/<user>/') : '',
+                text: el.childElementCount === 0 ? (el.textContent || '').trim().slice(0, 30) : '',
+                x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height), vis: r.width > 0 && r.height > 0 };
+            };
+            const inputs = [...document.querySelectorAll('input, [role="textbox"], textarea, [role="search"]')].map(pick);
+            const searchish = [...document.querySelectorAll('[aria-label]')].filter(e => /search|archive|share|qr/i.test(e.getAttribute('aria-label'))).map(pick);
+            const navLinks = [...document.querySelectorAll('a[href], [role="button"]')].filter(e => e.querySelector('svg[aria-label]')).map(pick).filter(e => e.vis).slice(0, 30);
+            const buttons = [...document.querySelectorAll('a[href], [role="button"], button')].map(pick).filter(e => e.vis && e.text && e.text.length < 24).slice(0, 40);
+            const firstReel = (document.querySelector('a[href*="/reel/"]') || {}).getAttribute ? document.querySelector('a[href*="/reel/"]').getAttribute('href') : null;
+            return JSON.stringify({ path: location.pathname, vw: innerWidth, firstReel, inputs, searchish, navLinks, buttons });
+            """#
+            webView.callAsyncJavaScript(js, arguments: [:], in: nil, in: Skin.world) { result in
+                if case .success(let v) = result, let text = v as? String {
+                    try? text.write(to: docs.appendingPathComponent("inspect.json"), atomically: true, encoding: .utf8)
+                }
+            }
+            let root: UIView = self.view
+            let image = UIGraphicsImageRenderer(bounds: root.bounds).image { _ in root.drawHierarchy(in: root.bounds, afterScreenUpdates: true) }
+            try? image.pngData()?.write(to: docs.appendingPathComponent("inspect.png"))
+            try? "done".write(to: docs.appendingPathComponent("inspect-done.txt"), atomically: true, encoding: .utf8)
+            timer.invalidate()
+        }
+    }
+
+        /// Dev-only (launch with -pgShoot <path>): once logged in, opens that page and saves a
     /// screenshot of the app to Documents/shot-1.png, shot-2.png (after a swipe-sized scroll).
     private func startShooting(_ path: String) {
         var stage = 0
@@ -410,6 +550,28 @@ final class BrowserViewController: UIViewController {
                 try? image.pngData()?.write(to: docs.appendingPathComponent("chat.png"))
             }
         }
+        if let i = args.firstIndex(of: "-pgInspect"), i + 1 < args.count {
+            inspect(args[i + 1])
+        }
+        if args.contains("-pgSearchProbe") { searchProbe() }
+        if args.contains("-pgSearchDemo") {
+            Timer.scheduledTimer(withTimeInterval: 6, repeats: false) { [weak self] _ in
+                guard let self else { return }
+                safeLoad(URL(string: "https://www.instagram.com/explore/")!)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                    guard let self else { return }
+                    searchBar.isHidden = false
+                    searchBar.text = "jack"
+                    self.searchBar(searchBar, textDidChange: "jack")
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 9) { [weak self] in
+                    guard let self, let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+                    let img = UIGraphicsImageRenderer(bounds: self.view.bounds).image { _ in self.view.drawHierarchy(in: self.view.bounds, afterScreenUpdates: true) }
+                    try? img.pngData()?.write(to: docs.appendingPathComponent("searchdemo.png"))
+                    try? "\(searchRows.count) rows".write(to: docs.appendingPathComponent("searchdemo.txt"), atomically: true, encoding: .utf8)
+                }
+            }
+        }
         if args.contains("-pgBgCheck") {
             // Dev-only: run the background check now and record what it read (numbers only).
             Task { @MainActor in
@@ -469,9 +631,21 @@ final class BrowserViewController: UIViewController {
         leaveChat()
     }
 
+    private var onSearchScreen: Bool { Skin.path(currentPath, isIn: "/explore") }
+
     private func updateChrome() {
         chatBackButton.isHidden = !inChat
         if inChat { view.bringSubviewToFront(chatBackButton) }
+        if onSearchScreen != !searchBar.isHidden {
+            searchBar.isHidden = !onSearchScreen
+            if !searchBar.isHidden { view.bringSubviewToFront(searchBar) }
+            else { searchBar.resignFirstResponder(); hideSearchResults() }
+        }
+        if onSearchScreen, !searchBar.isFirstResponder {
+            // Show the current query on a results page; empty on the Explore grid.
+            searchBar.text = URLComponents(url: webView.url ?? Self.home, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "q" })?.value?.removingPercentEncoding
+        }
         let path = currentPath
         let show = signedInWithNativeNav && !revealWebNav && !Skin.hidesTabBar(path: path)
         // Pull-to-refresh only where it can't fight Instagram's own scrolling (reels, stories, chats).
@@ -531,6 +705,7 @@ final class BrowserViewController: UIViewController {
     fileprivate func handleSkinMessage(_ body: Any) {
         guard let msg = body as? [String: Any] else { return }
         if msg["type"] as? String == "share" { presentShareSheet(msg); return }
+        if msg["type"] as? String == "shareProfile" { presentProfileShare(); return }
         if msg["type"] as? String == "badges" {
             let dms = ((msg["dms"] as? Int) ?? (msg["dms"] as? Double).map(Int.init)).map { max(0, min($0, 999)) }
             let activity = msg["activity"] as? Bool
@@ -864,6 +1039,254 @@ private extension UIImage {
             for c in 0..<3 { lo[c] = min(lo[c], px[i + c]); hi[c] = max(hi[c], px[i + c]) }
         }
         return (0..<3).allSatisfy { Int(hi[$0]) - Int(lo[$0]) < 12 }
+    }
+}
+
+// MARK: - Native Explore search
+
+extension BrowserViewController: UISearchBarDelegate {
+    func searchBarTextDidBeginEditing(_ searchBar: UISearchBar) {
+        searchBar.setShowsCancelButton(true, animated: true)
+    }
+
+    func searchBarCancelButtonClicked(_ searchBar: UISearchBar) {
+        searchBar.setShowsCancelButton(false, animated: true)
+        searchBar.text = nil
+        searchBar.resignFirstResponder()
+        hideSearchResults()
+        if Skin.path(currentPath, isIn: "/explore/search") {
+            safeLoad(URL(string: "https://www.instagram.com/explore/")!)
+        }
+    }
+
+    func searchBarSearchButtonClicked(_ searchBar: UISearchBar) {
+        searchBar.resignFirstResponder()
+        loadKeywordResults((searchBar.text ?? ""))
+    }
+
+    /// Typing: debounce, then ask Instagram for matching accounts and list them live.
+    func searchBar(_ searchBar: UISearchBar, textDidChange searchText: String) {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        searchWork?.cancel()
+        guard !query.isEmpty else { hideSearchResults(); return }
+        let work = DispatchWorkItem { [weak self] in self?.fetchAccounts(query) }
+        searchWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.28, execute: work)
+    }
+
+    private func loadKeywordResults(_ text: String) {
+        let query = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        hideSearchResults()
+        guard !query.isEmpty, let enc = query.addingPercentEncoding(withAllowedCharacters: .alphanumerics),
+              let url = URL(string: "https://www.instagram.com/explore/search/keyword/?q=\(enc)") else {
+            safeLoad(URL(string: "https://www.instagram.com/explore/")!); return
+        }
+        safeLoad(url)
+    }
+
+    private func hideSearchResults() {
+        searchRows = []
+        searchResults.isHidden = true
+    }
+
+    /// Queries Instagram's own account-search endpoint from the logged-in page (cookies + app id).
+    private func fetchAccounts(_ query: String) {
+        guard let enc = query.addingPercentEncoding(withAllowedCharacters: .alphanumerics) else { return }
+        // Body of an async function; `q` arrives via the arguments dictionary below.
+        let js = #"""
+        try {
+          const r = await fetch('/api/v1/fbsearch/account_serp/?query=' + q,
+            { headers: { 'x-ig-app-id': '936619743392459' }, credentials: 'include' });
+          if (!r.ok) return '[]';
+          const j = await r.json();
+          return JSON.stringify((j.users || []).slice(0, 12).map(x => {
+            const u = x.user || x;
+            return { u: u.username || '', n: u.full_name || '', v: !!u.is_verified, a: u.profile_pic_url || '' };
+          }).filter(x => x.u));
+        } catch (_) { return '[]'; }
+        """#
+        webView.callAsyncJavaScript(js, arguments: ["q": enc], in: nil, in: .page) { [weak self] result in
+            guard let self else { return }
+            #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("-pgSearchDemo"),
+               let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+                let dbg: String
+                switch result { case .success(let v): dbg = "OK: \(v as? String ?? String(describing: v))"; case .failure(let e): dbg = "FAIL: \(e)" }
+                try? dbg.write(to: docs.appendingPathComponent("fetchdbg.txt"), atomically: true, encoding: .utf8)
+            }
+            #endif
+            // Ignore stale responses if the query moved on.
+            guard searchBar.text?.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
+            var rows: [SearchRow] = [SearchRow(title: "See results for \u{201C}\(query)\u{201D}", isQuery: true)]
+            if case .success(let v) = result, let text = v as? String,
+               let data = text.data(using: .utf8),
+               let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+                for item in arr {
+                    guard let u = item["u"] as? String, !u.isEmpty else { continue }
+                    let avatar = (item["a"] as? String).flatMap(URL.init(string:))
+                    rows.append(SearchRow(username: u, title: u, subtitle: item["n"] as? String ?? "",
+                                          avatar: avatar, verified: item["v"] as? Bool ?? false))
+                }
+            }
+            searchRows = rows
+            searchResults.isHidden = false
+            view.bringSubviewToFront(searchResults)
+            view.bringSubviewToFront(searchBar)
+            searchResults.reloadData()
+        }
+    }
+}
+
+// MARK: - Search results list
+
+extension BrowserViewController: UITableViewDataSource, UITableViewDelegate {
+    func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { searchRows.count }
+
+    func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        let cell = tableView.dequeueReusableCell(withIdentifier: "hit", for: indexPath)
+        let row = searchRows[indexPath.row]
+        cell.backgroundColor = .clear
+        cell.selectionStyle = .gray
+        var config = UIListContentConfiguration.subtitleCell()
+        config.textProperties.color = .white
+        config.secondaryTextProperties.color = UIColor.white.withAlphaComponent(0.55)
+        config.imageProperties.cornerRadius = row.isQuery ? 0 : 22
+        config.imageProperties.maximumSize = CGSize(width: 44, height: 44)
+        if row.isQuery {
+            config.text = row.title
+            config.secondaryText = nil
+            config.image = UIImage(systemName: "magnifyingglass")?.withTintColor(.white, renderingMode: .alwaysOriginal)
+        } else {
+            config.text = row.verified ? "\(row.username)  ✔︎" : row.username
+            config.secondaryText = row.subtitle.isEmpty ? nil : row.subtitle
+            config.image = placeholderAvatar()
+            if let url = row.avatar { loadAvatar(url, into: tableView, at: indexPath) }
+        }
+        cell.contentConfiguration = config
+        return cell
+    }
+
+    func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+        tableView.deselectRow(at: indexPath, animated: true)
+        let row = searchRows[indexPath.row]
+        searchBar.resignFirstResponder()
+        hideSearchResults()
+        if row.isQuery {
+            loadKeywordResults(searchBar.text ?? "")
+        } else if row.username.range(of: #"^[A-Za-z0-9._]{1,40}$"#, options: .regularExpression) != nil,
+                  let url = URL(string: "https://www.instagram.com/\(row.username)/") {
+            searchBar.text = nil
+            safeLoad(url)
+        }
+    }
+
+    private func placeholderAvatar() -> UIImage? {
+        let size = CGSize(width: 44, height: 44)
+        return UIGraphicsImageRenderer(size: size).image { ctx in
+            UIColor(white: 0.18, alpha: 1).setFill()
+            UIBezierPath(ovalIn: CGRect(origin: .zero, size: size)).fill()
+            UIImage(systemName: "person.fill")?.withTintColor(UIColor(white: 0.5, alpha: 1), renderingMode: .alwaysOriginal)
+                .draw(in: CGRect(x: 12, y: 12, width: 20, height: 20))
+        }
+    }
+
+    /// Avatars are fetched cookie-free from Instagram's image servers, cached in memory.
+    private func loadAvatar(_ url: URL, into tableView: UITableView, at indexPath: IndexPath) {
+        if let cached = avatarCache.object(forKey: url as NSURL) {
+            setCellImage(cached, tableView, indexPath); return
+        }
+        guard let host = url.host?.lowercased(),
+              Privacy.host(host, isWithin: "fbcdn.net") || Privacy.host(host, isWithin: "cdninstagram.com") else { return }
+        var request = URLRequest(url: url)
+        request.setValue(Privacy.userAgent, forHTTPHeaderField: "User-Agent")
+        Self.imageSession.dataTask(with: request) { [weak self] data, _, _ in
+            guard let self, let data, let image = UIImage(data: data) else { return }
+            avatarCache.setObject(image, forKey: url as NSURL)
+            DispatchQueue.main.async {
+                // Still the same row, and the query hasn't changed underneath it?
+                guard indexPath.row < self.searchRows.count, self.searchRows[indexPath.row].avatar == url else { return }
+                self.setCellImage(image, tableView, indexPath)
+            }
+        }.resume()
+    }
+
+    private func setCellImage(_ image: UIImage, _ tableView: UITableView, _ indexPath: IndexPath) {
+        guard let cell = tableView.cellForRow(at: indexPath),
+              var config = cell.contentConfiguration as? UIListContentConfiguration else { return }
+        config.image = image
+        config.imageProperties.cornerRadius = 22
+        config.imageProperties.maximumSize = CGSize(width: 44, height: 44)
+        cell.contentConfiguration = config
+    }
+}
+
+// MARK: - Share profile (QR)
+// MARK: - Share profile (QR)
+
+extension BrowserViewController {
+    /// Shows a QR code of your profile plus a Share button — generated on the phone, offline.
+    func presentProfileShare() {
+        guard presentedViewController == nil, let profilePath,
+              let url = URL(string: "https://www.instagram.com\(profilePath)") else { return }
+        let handle = profilePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let qr = Self.qrImage(for: url.absoluteString)
+        let panel = ProfileShareView(handle: handle, qr: qr, onShare: { [weak self] in
+            guard let self else { return }
+            let sheet = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+            sheet.popoverPresentationController?.sourceView = view
+            presentedViewController?.present(sheet, animated: true)
+        }, onClose: { [weak self] in self?.dismiss(animated: true) })
+        let host = UIHostingController(rootView: panel)
+        host.overrideUserInterfaceStyle = .dark
+        if let presentation = host.sheetPresentationController {
+            presentation.detents = [.medium()]
+            presentation.prefersGrabberVisible = true
+        }
+        present(host, animated: true)
+    }
+
+    static func qrImage(for string: String) -> UIImage? {
+        let data = Data(string.utf8)
+        guard let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
+        filter.setValue(data, forKey: "inputMessage")
+        filter.setValue("M", forKey: "inputCorrectionLevel")
+        guard let output = filter.outputImage else { return nil }
+        let scaled = output.transformed(by: CGAffineTransform(scaleX: 16, y: 16))
+        let context = CIContext()
+        guard let cg = context.createCGImage(scaled, from: scaled.extent) else { return nil }
+        return UIImage(cgImage: cg)
+    }
+}
+
+private struct ProfileShareView: View {
+    let handle: String
+    let qr: UIImage?
+    let onShare: () -> Void
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("@\(handle)").font(.headline).padding(.top, 28)
+            if let qr {
+                Image(uiImage: qr)
+                    .interpolation(.none)
+                    .resizable()
+                    .frame(width: 220, height: 220)
+                    .padding(16)
+                    .background(Color.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 16))
+            }
+            Text("Point a camera at this code to open the profile.")
+                .font(.footnote).foregroundStyle(.secondary)
+            Button(action: onShare) {
+                Label("Share profile link", systemImage: "square.and.arrow.up")
+                    .frame(maxWidth: .infinity).padding(.vertical, 12)
+            }
+            .buttonStyle(.borderedProminent)
+            .padding(.horizontal, 32)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
     }
 }
 

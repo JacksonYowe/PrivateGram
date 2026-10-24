@@ -123,6 +123,26 @@ enum Skin {
           if (key !== lastBadges) { lastBadges = key; post({ type: 'badges', dms: b.dms, activity: b.activity }); }
         } catch (_) {}
         applyStyle();
+        // Tag Instagram's own (non-working) Explore search box so the CSS can hide it; a native
+        // search bar replaces it.
+        const sInp = document.querySelector('input[placeholder="Search"], input[aria-label="Search input"]');
+        if (sInp) {
+          let p = sInp;
+          for (let i = 0; i < 5 && p; i++, p = p.parentElement) {
+            const r = p.getBoundingClientRect();
+            if (r.width > 180 && r.height >= 30 && r.height < 70) { p.setAttribute('data-pg-searchbox', ''); break; }
+          }
+        }
+        // On your profile: relabel "View archive" to "Share profile" (it opens a native QR sheet).
+        for (const el of document.querySelectorAll('a[href], [role="button"], button')) {
+          const t = (el.textContent || '').trim();
+          if (t === 'View archive' || t === 'Share profile') {
+            el.setAttribute('data-pg-shareprofile', '');
+            const span = [...el.querySelectorAll('*')].find(c => c.childElementCount === 0 && c.textContent.trim() === 'View archive');
+            if (span) span.textContent = 'Share profile';
+            else for (const n of el.childNodes) if (n.nodeType === 3 && n.textContent.trim() === 'View archive') n.textContent = 'Share profile';
+          }
+        }
         if (!nav || !nav.isConnected) nav = findNav();
         if (!nav) { report({ type: 'nav', found: false }); return; }
         const rect = nav.getBoundingClientRect();
@@ -185,8 +205,20 @@ enum Skin {
       document.addEventListener('click', (e) => {
         if (!e.isTrusted) return;
         const target = e.target instanceof Element ? e.target : null;
-        const button = target && target.closest('[role="button"], button, a, svg');
+        if (!target) return;
+        // In a chat, open a tapped reel in the full-screen reels viewer, not the in-chat popup.
+        if (/^\/direct\/t\//.test(location.pathname)) {
+          const link = target.closest('a[href*="/reel"]');
+          const m = link && /\/reels?\/([A-Za-z0-9_-]+)/.exec(link.getAttribute('href') || '');
+          if (m) { e.preventDefault(); e.stopImmediatePropagation(); location.assign('/reels/' + m[1] + '/'); return; }
+        }
+        const button = target.closest('[role="button"], button, a, svg');
         if (!button) return;
+        // "Share profile" (our relabelled "View archive"): open the native QR sheet instead.
+        const btnText = (button.textContent || '').trim();
+        const shareProfile = target.closest('[data-pg-shareprofile]')
+          || (btnText === 'Share profile' || btnText === 'View archive' ? button : null);
+        if (shareProfile) { e.preventDefault(); e.stopImmediatePropagation(); post({ type: 'shareProfile' }); return; }
         const svg = button.matches('svg') ? button : button.querySelector('svg[aria-label]');
         const label = svg ? (svg.getAttribute('aria-label') || '').toLowerCase() : '';
         if (label !== 'share' && label !== 'share post') return;
@@ -258,6 +290,36 @@ enum Skin {
       }, true);
 
       let pending = false;
+      // Double-tap a reel to like it (like the app). Touch events still reach this private world
+      // even though the page is told it's a desktop browser. Only likes (never un-likes).
+      const isReels = () => /^\/reels?(\/|$)/.test(location.pathname);
+      const likeCurrentReel = (x, y) => {
+        const svgs = [...document.querySelectorAll('svg[aria-label="Like"]')];
+        const svg = svgs.find(sv => { const r = sv.getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight + 1 && r.width > 0; }) || svgs[0];
+        if (!svg) return; // already liked (its label becomes "Unlike")
+        const btn = svg.closest('[role="button"], button, span, div');
+        if (btn) btn.click();
+        heartPop(x, y);
+      };
+      const heartPop = (x, y) => {
+        const d = document.createElement('div');
+        d.textContent = '\u2764\uFE0F';
+        d.style.cssText = 'position:fixed;left:' + (x - 45) + 'px;top:' + (y - 45) + 'px;font-size:90px;z-index:2147483647;' +
+          'pointer-events:none;will-change:transform,opacity;transition:transform .5s cubic-bezier(.2,.8,.3,1),opacity .5s;transform:scale(.3);opacity:0;';
+        document.body.appendChild(d);
+        requestAnimationFrame(() => { d.style.transform = 'scale(1)'; d.style.opacity = '1'; });
+        setTimeout(() => { d.style.transform = 'scale(1.3)'; d.style.opacity = '0'; }, 420);
+        setTimeout(() => d.remove(), 950);
+      };
+      let lastTap = 0, lastX = 0, lastY = 0;
+      document.addEventListener('pointerup', (e) => {
+        if (!isReels() || e.pointerType === 'mouse') return;
+        const now = Date.now();
+        if (now - lastTap < 320 && Math.abs(e.clientX - lastX) < 50 && Math.abs(e.clientY - lastY) < 50) {
+          lastTap = 0; likeCurrentReel(e.clientX, e.clientY);
+        } else { lastTap = now; lastX = e.clientX; lastY = e.clientY; }
+      }, true);
+
       const start = () => {
         scan();
         // At most four checks a second, however busy the page is.

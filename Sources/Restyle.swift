@@ -10,6 +10,13 @@ enum Restyle {
 
     static let css: [String: String] = [
         // The floating "Messages" bubble from the website (the app has a Messages tab instead).
+        // Explore / search: hide Instagram's own (non-working) search box and leave room at the
+        // top for PrivateGram's native search bar.
+        "explore": """
+        [data-pg-searchbox] { display: none !important; }
+        main[role="main"] { padding-top: 50px !important; }
+        """,
+
         "all": #"div:has(> div[role="button"] svg[aria-label="Messages"]):not(:has(main, a, input, textarea, [role="dialog"])) { visibility: hidden !important; }"#,
 
         // An open chat: full screen like the app — no strip of profile pictures down the side and
