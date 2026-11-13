@@ -92,6 +92,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         reset.addItem(item("Clear Cache Only (Stay Signed In)", #selector(MacBrowserController.clearCache(_:)), ""))
         main.addItem(submenu(reset, title: "Reset"))
 
+        let account = NSMenu(title: "Account")
+        account.addItem(item("Follower Insights…", #selector(MacBrowserController.showInsights(_:)), "i", [.command, .shift]))
+        main.addItem(submenu(account, title: "Account"))
+
         let windowMenu = NSMenu(title: "Window")
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")

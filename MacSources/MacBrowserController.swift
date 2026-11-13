@@ -44,6 +44,17 @@ final class MacBrowserController: NSViewController, NSMenuItemValidation {
         Task { await Privacy.deleteRetiredDataStores() }
     }
 
+
+    /// Runs an async JS body in the logged-in instagram.com page and returns its String result.
+    /// (callAsyncJavaScript's body form resolves awaited fetches on macOS.)
+    @MainActor func runPageJS(_ body: String) async -> String? {
+        (try? await webView.callAsyncJavaScript(body, arguments: [:], in: nil, contentWorld: .page)) as? String
+    }
+
+    @objc func showInsights(_ sender: Any?) {
+        Insights.shared.present(host: view.window) { [weak self] js in await self?.runPageJS(js) }
+    }
+
     override func viewDidAppear() {
         super.viewDidAppear()
         view.window?.makeFirstResponder(webView)
